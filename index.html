@@ -606,7 +606,7 @@ body > *:not(.container) img[src*="opus"] {
         <input id="cornerCount" type="hidden">
 
         <!-- mixed‐panel checkbox -->
-        <div style="grid-column:1/2">
+        <div id="allowMixedContainer" style="grid-column:1/2">
           <label>
             <input type="checkbox" id="allowMixed">
             Allow mixed panel sizes (±200 mm)
@@ -636,6 +636,21 @@ body > *:not(.container) img[src*="opus"] {
         </div>
       </div>
 
+      <!-- Glass Mode controls -->
+      <div id="glassModeRow" style="display:flex;gap:1rem;margin-top:1rem">
+        <div style="flex:0 0 220px;min-width:220px">
+          <label>Glass Mode</label>
+          <select id="glassType" style="width:100%">
+            <option value="standard" selected>Standard</option>
+            <option value="stock">Stock Sizes</option>
+          </select>
+        </div>
+        <div id="gapSelectContainer" style="flex:0 0 220px;min-width:220px">
+          <label>Gap size (mm)</label>
+          <select id="gapSize" style="width:100%"></select>
+        </div>
+        <!-- allowMixedContainer toggled by JS; existing checkbox above is used -->
+      </div>
       <!-- EXTRA PACKERS (OPTIONAL) -->
       <div style="display:flex;align-items:center;gap:1rem;justify-content:center;margin:1rem 0">
         <div style="display:flex;align-items:center;gap:0.5rem">
@@ -957,11 +972,17 @@ if (document.querySelector('.disc-head-card')) {
     // Reset disc head picker selections and default head
     document.querySelectorAll('#discHeadPicker .disc-option').forEach(option => {
       option.classList.remove('selected');
+      // Also clear the highlight border colour
+      option.style.borderColor = 'transparent';
     });
     // Default to exposed head type (PF150)
     selectedHead = 'PF150';
     const defaultOpt = document.querySelector('#discHeadPicker .disc-option[data-head="PF150"]');
-    if (defaultOpt) defaultOpt.classList.add('selected');
+    if (defaultOpt) {
+      defaultOpt.classList.add('selected');
+      // Apply highlight border to the default selection
+      defaultOpt.style.borderColor = '#0077c8';
+    }
     
     // Reset global variables and clear all data
     curShape = null;
@@ -1096,8 +1117,15 @@ function drawMini(){
   // Listen for clicks on disc head options; update selectedHead and highlight selection
   document.querySelectorAll('#discHeadPicker .disc-option').forEach(opt => {
     opt.addEventListener('click', () => {
-      document.querySelectorAll('#discHeadPicker .disc-option').forEach(o => o.classList.remove('selected'));
+      // When clicking a head type option, clear selection and border from all
+      document.querySelectorAll('#discHeadPicker .disc-option').forEach(o => {
+        o.classList.remove('selected');
+        o.style.borderColor = 'transparent';
+      });
+      // Mark the clicked option as selected and apply highlight border colour
       opt.classList.add('selected');
+      opt.style.borderColor = '#0077c8';
+      // Update the global selected head code
       selectedHead = opt.dataset.head || 'PF150';
       console.log('PF150 head selected:', selectedHead);
     });
@@ -1415,7 +1443,7 @@ function refreshSelectors() {
     const hr = $('handrailType').value;
     const fin = $('finishType').value;
     const fix = $('fixingType').value;
-    const allowMix = $('allowMixed').checked;
+    let allowMix = $('allowMixed').checked;
     const extraPackers = +$('extraPackers').value || 0;
 
     console.log('Calculation inputs:', {fence, thk, ht, zone, hr, fin, fix});
@@ -1533,14 +1561,38 @@ function refreshSelectors() {
     if (allow3El) allow3El.parentElement.style.display = 'none';
 
     // Dynamic gap and panel layout logic
-    const gMin = 10, gMax = fence === 'pool' ? 50 : 26;
+    // gMin and gMax will be set dynamically based on Glass Mode (see below)
+    let gMin, gMax;
+    // Set gMin/gMax and panel step based on Glass Mode
+    {
+      var modeVal = (document.getElementById('glassType') ? document.getElementById('glassType').value : 'standard');
+      var selectedGap = +(document.getElementById('gapSize') ? document.getElementById('gapSize').value : 20);
+      // Determine system cap based on fence type
+      var systemCap = (document.getElementById('fenceType') && document.getElementById('fenceType').value === 'pool') ? 50 : 26;
+      if (modeVal === 'standard') {
+        // continuous panels: search band [selectedGap, selectedGap+1]
+        gMin = selectedGap;
+        gMax = Math.min(selectedGap + 1, systemCap);
+        // Force continuous panel widths
+        PANEL_STEP = 0;
+        // Disable mixed panel sizes in standard mode
+        allowMix = false;
+      } else {
+        // Stock sizes: step panels
+        PANEL_STEP = 50;
+        gMin = 10;
+        gMax = systemCap;
+      }
+    }
     layouts = []; sideLens = spans;
     let total = 0, panels = [], posts = 0, rails = 0, gasket = 0, handrailMeters = 0;
 
     function sd50Sym(run, minGap, maxGap, maxPanel) {
       let cnt = Math.ceil(run / maxPanel);
       while (cnt < 600) {
-        let pw = Math.min(maxPanel, Math.floor(run / cnt / 25) * 25);
+        // Use dynamic panel step: 0 => continuous (1mm), >0 => stepped
+        const step = (PANEL_STEP > 0 ? PANEL_STEP : 1);
+        let pw = Math.min(maxPanel, (PANEL_STEP > 0 ? Math.floor(run / cnt / PANEL_STEP) * PANEL_STEP : (run / cnt)));
         while (pw >= 200) {
           let discs = Math.max(2, Math.ceil((pw - 2 * edge) / MAX_SPACING) + 1);
           if (discs > MAX_DISCS_PER_PANEL) {
@@ -1553,7 +1605,7 @@ function refreshSelectors() {
           if (gap >= minGap && gap <= maxGap) {
             return { panelWidths: Array(cnt).fill(pw), gap, run };
           }
-          pw -= 50;
+          pw -= step;
         }
         cnt++;
       }
@@ -1562,8 +1614,9 @@ function refreshSelectors() {
     function sd50Mix(run, minGap, maxGap, maxPanel) {
       let cnt = Math.ceil(run / maxPanel);
       while (cnt < 600) {
-        for (let A = maxPanel; A >= 200; A -= 25) {
-          for (let B = A; B >= A - 200; B -= 25) {
+        const stepMix = (PANEL_STEP > 0 ? PANEL_STEP : 50);
+        for (let A = maxPanel; A >= 200; A -= stepMix) {
+          for (let B = A; B >= A - 200; B -= stepMix) {
             for (let k = 1; k < cnt; k++) {
               let discsA = Math.max(2, Math.ceil((A - 2 * edge) / MAX_SPACING) + 1);
               let discsB = Math.max(2, Math.ceil((B - 2 * edge) / MAX_SPACING) + 1);
@@ -1588,12 +1641,13 @@ function refreshSelectors() {
       const gateAdjustedSym = (run, min, max, maxP) => {
         let cnt = Math.ceil(run / maxP);
         while (cnt < 600) {
-          let pw = Math.min(maxP, Math.floor(run / cnt / 50) * 50);
+          const stepGate = (PANEL_STEP > 0 ? PANEL_STEP : 1);
+          let pw = Math.min(maxP, (PANEL_STEP > 0 ? Math.floor(run / cnt / PANEL_STEP) * PANEL_STEP : (run / cnt)));
           while (pw >= 200) {
             // Modified gap calculation: cnt gaps instead of cnt+1 (gate replaces one gap)
             const gap = (run - pw * cnt) / cnt;
             if (gap >= min && gap <= max) return { panelWidths: Array(cnt).fill(pw), gap, run };
-            pw -= 50;
+            pw -= stepGate;
           }
           cnt++;
         }
@@ -1603,8 +1657,9 @@ function refreshSelectors() {
       const gateAdjustedMix = (run, min, max, maxP) => {
         let cnt = Math.ceil(run / maxP);
         while (cnt < 600) {
-          for (let A = maxP; A >= 200; A -= 50) {
-            for (let B = A; B >= A - 200; B -= 50) {
+          const stepGate = (PANEL_STEP > 0 ? PANEL_STEP : 50);
+          for (let A = maxP; A >= 200; A -= stepGate) {
+            for (let B = A; B >= A - 200; B -= stepGate) {
               for (let k = 1; k < cnt; k++) {
                 const tot = (cnt - k) * A + k * B;
                 // Modified gap calculation: cnt gaps instead of cnt+1
@@ -2546,7 +2601,7 @@ function refreshSelectors() {
         r.setAttribute('stroke', '#333');
         svg.appendChild(r);
         const t = document.createElementNS(NS, 'text');
-        t.textContent = pw;
+        t.textContent = fmtW(pw);
         t.setAttribute('x', x + w / 2); t.setAttribute('y', 105);
         t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', '12');
         t.setAttribute('font-weight', 'bold');
@@ -2660,7 +2715,8 @@ function refreshSelectors() {
         r.setAttribute('fill','#a8d6ff');r.setAttribute('stroke','#333');
         svg.appendChild(r);
         const t=document.createElementNS(NS,'text');
-        t.textContent=pw;
+        // Use formatted width for the label (two decimals in continuous mode)
+        t.textContent=fmtW(pw);
         t.setAttribute('x',x+w/2);t.setAttribute('y',105);
         t.setAttribute('text-anchor','middle');t.setAttribute('font-size','12');
         t.setAttribute('font-weight','bold');
@@ -3914,7 +3970,7 @@ svg.appendChild(overallLabel);
         
         // Panel length label with proper orientation
         const t = document.createElementNS(NS,'text');
-        t.textContent = `${Math.round(pw)} mm`;
+        t.textContent = `${fmtW(pw)} mm`;
         t.setAttribute('font-size', String(PANEL_FONT));
         t.setAttribute('font-weight', 'bold');
         t.setAttribute('fill', 'rgb(20,80,160)');
@@ -6261,6 +6317,44 @@ updateViewBox();
     };
   }
 
+  </script>
+  <script>
+    // Glass Mode helpers for PF150
+    // PANEL_STEP: 0 for continuous widths (Standard mode), 50 for 50mm increments (Stock mode)
+    var PANEL_STEP = 50;
+    // Format width: show two decimals only when PANEL_STEP is 0
+    function fmtW(w){ return PANEL_STEP <= 0 ? (+w).toFixed(2) : Math.round(w); }
+    // Populate gap options based on fence type
+    function updateGapOptionsPF(){
+      var fenceEl = document.getElementById('fenceType');
+      var sel = document.getElementById('gapSize'); if(!sel) return;
+      sel.innerHTML = '';
+      var fence = fenceEl ? fenceEl.value : 'balustrade';
+      var min = 10, max = (fence === 'pool') ? 50 : 26;
+      for(var g = min; g <= max; g++){
+        var o = document.createElement('option'); o.value = o.textContent = g; sel.appendChild(o);
+      }
+      sel.value = (fence === 'pool') ? '20' : '12';
+    }
+    // Toggle visibility of gap and mixed controls based on Glass Mode
+    function updateGlassModeUIPF(){
+      var mode = (document.getElementById('glassType') || {}).value || 'standard';
+      var gapC = document.getElementById('gapSelectContainer');
+      var mixC = document.getElementById('allowMixedContainer');
+      if(mode === 'standard'){
+        if(gapC) gapC.style.display = '';
+        if(mixC) mixC.style.display = 'none';
+      } else {
+        if(gapC) gapC.style.display = 'none';
+        if(mixC) mixC.style.display = '';
+      }
+    }
+    document.addEventListener('DOMContentLoaded', function(){
+      updateGapOptionsPF();
+      updateGlassModeUIPF();
+      var f = document.getElementById('fenceType'); if(f) f.addEventListener('change', updateGapOptionsPF);
+      var g = document.getElementById('glassType'); if(g) g.addEventListener('change', updateGlassModeUIPF);
+    });
   </script>
 
 
